@@ -25,16 +25,30 @@ src/
 │   ├── orders.module.ts
 │   ├── orders.controller.ts
 │   ├── orders.service.ts
-│   └── dto/
-│       ├── create-order.dto.ts
-│       └── update-order.dto.ts
+│   ├── dto/
+│   │   ├── create-order.dto.ts
+│   │   └── update-order.dto.ts
+│   └── entities/
+│       └── order.entity.ts
 ├── inventory/
 │   ├── inventory.module.ts
-│   └── inventory.service.ts
+│   ├── inventory.service.ts
+│   └── entities/
+│       └── product.entity.ts
 ├── notifications/
 │   ├── notifications.module.ts
-│   └── notifications.service.ts
-└── app.module.ts
+│   ├── notifications.service.ts
+│   └── notification.interface.ts   # provider-agnostic contract + DI token
+├── health/
+│   ├── health.module.ts
+│   └── health.controller.ts        # liveness + DB readiness probe
+├── common/
+│   └── filters/
+│       └── http-exception.filter.ts # consistent error responses
+├── database/
+│   └── database.module.ts          # TypeORM + SQLite configuration
+├── app.module.ts
+└── main.ts
 ```
 
 ### Core Domain Modules
@@ -46,7 +60,7 @@ Acts as the orchestrator. It handles the full transaction flow — from receivin
 Encapsulates all stock logic. It validates availability and manages reservation locks, ensuring data integrity without leaking business rules into the Order layer.
 
 **Notification Module**
-A dedicated service for user communication. Because it lives in its own module, you can swap the underlying provider (Email → SMS → Push) without touching a single line of core business logic.
+A dedicated service for user communication. The Orders layer depends only on the `INotificationService` interface (bound through the `NOTIFICATION_SERVICE` injection token), so the underlying provider (Email → SMS → Push) can be swapped by binding a different implementation — without touching a single line of core business logic. Notification delivery is treated as a side effect: a failure is logged and isolated so it can never roll back a successfully placed order.
 
 ---
 
@@ -85,12 +99,28 @@ cd syncflow-order-api
 npm install
 ```
 
-**3. Start the development server**
+**3. Configure environment variables**
+```bash
+cp .env.example .env
+```
+
+All variables have sensible defaults, so this step is optional for local development.
+
+**4. Start the development server**
 ```bash
 npm run start:dev
 ```
 
-The API will be available at `http://localhost:3000`.
+The API will be available at `http://localhost:3000`, and interactive Swagger
+documentation at `http://localhost:3000/docs`.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3000` | HTTP port the API listens on |
+| `DATABASE_PATH` | `syncflow.sqlite` | SQLite file path (use `:memory:` for ephemeral storage) |
+| `NODE_ENV` | `development` | When `production`, disables TypeORM schema auto-sync |
 
 ---
 
@@ -103,6 +133,8 @@ The API will be available at `http://localhost:3000`.
 | `GET` | `/orders/:id` | Retrieve a single order by ID |
 | `PATCH` | `/orders/:id` | Update an order |
 | `DELETE` | `/orders/:id` | Delete an order |
+| `GET` | `/health` | Liveness and database readiness probe |
+| `GET` | `/docs` | Interactive Swagger / OpenAPI documentation |
 
 ### Example Request — Create Order
 
@@ -150,6 +182,16 @@ Response returned to Client
 ```
 
 Everything is synchronous, predictable, and easy to trace in a debugger or a code review.
+
+---
+
+## 🔒 Data Integrity & Concurrency
+
+Stock is a shared resource, so the system is designed to stay correct under concurrent load:
+
+- **Atomic reservations** — `InventoryService.checkAndReserve()` reserves stock with a single conditional `UPDATE ... WHERE stock >= :quantity`. The check and the decrement happen as one indivisible operation, so two simultaneous orders can never both pass and oversell the same units.
+- **Transactional orchestration** — creating, updating, and deleting an order runs inside a database transaction. If updating an order requires re-reserving stock and that fails, the transaction rolls back, leaving inventory and orders perfectly consistent.
+- **Isolated side effects** — notifications run outside the order transaction. A delivery failure is logged but never rolls back a successfully placed order.
 
 ---
 
@@ -216,10 +258,11 @@ const module = await Test.createTestingModule({
 ## 🗺️ Execution Roadmap
 
 - [x] Phase 1: **Foundation** — NestJS project setup, module scaffolding, `Order` entity definition
-- [ ] Phase 2: **Domain Logic** — `InventoryService` with stock validation and reservation logic
-- [ ] Phase 3: **Integration** — Wire `OrdersService` to `InventoryService` and `NotificationService` via DI
-- [ ] Phase 4: **Validation** — Full request validation using `class-validator` on all DTOs
-- [ ] Phase 5: **Reliability** — Comprehensive unit tests, integration tests, and coverage report
+- [x] Phase 2: **Domain Logic** — `InventoryService` with atomic stock validation and reservation logic
+- [x] Phase 3: **Integration** — Wire `OrdersService` to `InventoryService` and `NotificationService` via DI
+- [x] Phase 4: **Validation** — Full request validation using `class-validator` on all DTOs
+- [x] Phase 5: **Reliability** — Comprehensive unit tests, integration tests, and coverage report
+- [x] Phase 6: **Persistence & Polish** — TypeORM + SQLite, Swagger docs, health checks, global error handling
 
 ---
 
@@ -229,8 +272,13 @@ const module = await Test.createTestingModule({
 |---|---|
 | **NestJS** | Framework — modules, controllers, services, DI container |
 | **TypeScript** | Strict typing across the entire codebase |
+| **TypeORM** | Persistence layer and transactional data access |
+| **SQLite** (better-sqlite3) | Zero-config embedded database |
 | **class-validator** | Declarative DTO validation |
 | **class-transformer** | Request payload transformation |
+| **@nestjs/config** | Environment-based configuration |
+| **@nestjs/swagger** | OpenAPI documentation at `/docs` |
+| **@nestjs/terminus** | Health checks at `/health` |
 | **Jest** | Unit and integration testing |
 | **ESLint + Prettier** | Code quality and consistent formatting |
 
